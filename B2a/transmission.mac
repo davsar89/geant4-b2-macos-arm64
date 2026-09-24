@@ -1,0 +1,24 @@
+# Physics check: uncollided 6 MeV gamma transmission through the 5 cm lead target.
+# Counts photons that still have the full beam energy in a 2x2x0.2 cm cell just
+# behind the target (target back face at z = -240 cm). test_package.sh compares
+# mu/rho = -ln(N_cell/N_beam)/(rho x) with NIST XCOM.
+#
+/control/verbose 2
+/run/verbose 1
+/random/setSeeds 12345 67890
+/run/initialize
+#
+/score/create/boxMesh behindTarget
+/score/mesh/boxSize 1. 1. 0.1 cm
+/score/mesh/translate/xyz 0. 0. -239.8 cm
+/score/mesh/nBin 1 1 1
+/score/quantity/nOfTrack uncollided 1
+/score/filter/particleWithKineticEnergy fullEnergyGamma 5.9999 6.0001 MeV gamma
+/score/close
+#
+/gun/particle gamma
+/gun/energy 6 MeV
+/run/printProgress 50000
+/run/beamOn 200000
+#
+/score/dumpQuantityToFile behindTarget uncollided transmission.csv

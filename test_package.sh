@@ -1,0 +1,120 @@
+#!/bin/bash
+# Self-test of the portable exampleB2a package. Needs nothing installed.
+# Usage (from the unzipped folder):  ./test_package.sh
+#
+#  1. binary is arm64 and uses only macOS system libraries or libraries inside the bundle
+#  2. the B2 macros run cleanly with only the bundled datasets
+#  3. physics: 6 MeV gamma attenuation in the 5 cm lead target agrees with NIST XCOM
+#  4. GDML: exporting the geometry and reading it back gives the same physics and tracker hits
+#  5. (information) which bundled datasets / G4EMLOW subdirectories the physics actually reads
+set -uo pipefail
+
+HERE="$(cd "$(dirname "$0")" && pwd)"
+APP="$HERE/exampleB2a.app"
+EXE="$APP/Contents/MacOS/exampleB2a"
+RES="$APP/Contents/Resources"
+
+# Use only the bundled datasets
+unset GEANT4_DATA_DIR $(env | sed -n 's/^\(G4[A-Z0-9_]*DATA\)=.*/\1/p')
+
+WORK="${TEST_WORKDIR:-$(mktemp -d)}"  # CI sets TEST_WORKDIR to keep the logs
+mkdir -p "$WORK" && cd "$WORK" || exit 1
+echo "Logs in $WORK"
+
+fails=0
+pass() { echo "PASS  $*"; }
+fail() { echo "FAIL  $*"; fails=$((fails + 1)); }
+
+# run <log> <args...>: batch run; fails on a non-zero exit, a G4Exception error or an interrupted macro
+run() {
+  local log="$1"; shift
+  if "$EXE" "$@" > "$log" 2>&1 \
+     && ! grep -qE 'EEEE ------- G4Exception-START|Batch is interrupted|Can not open a macro file' "$log"; then
+    pass "exampleB2a $* ($log)"
+  else
+    fail "exampleB2a $* ($log)"; tail -n 40 "$log"
+  fi
+}
+
+echo "== 1. Binary and linking"
+file "$EXE" | grep -q 'arm64' && pass "arm64 executable" || fail "not arm64: $(file "$EXE")"
+echo "      minimum macOS: $(otool -l "$EXE" | awk '/LC_BUILD_VERSION/ {f = 1} f && /minos/ {print $2; exit}')"
+bad=$(find "$APP" -path "$RES/data" -prune -o -type f -print | while read -r f; do
+        file "$f" | grep -q 'Mach-O' || continue
+        otool -arch arm64 -L "$f" | tail -n +2 | awk '{print $1}' \
+          | grep -vE '^(/usr/lib/|/System/Library/|@rpath/|@executable_path/|@loader_path/)' | sed "s|^|$f: |"
+      done)
+[ -z "$bad" ] && pass "only macOS system libraries and bundled Qt" || { fail "external library dependencies:"; echo "$bad"; }
+
+echo "== 2. B2 macros with the bundled data"
+run run1.log run1.mac
+run smoke.log smoke.mac
+
+echo "== 3. Physics: uncollided 6 MeV gamma transmission through 5 cm of lead vs NIST XCOM"
+# mu/rho(Pb, 6 MeV) without coherent scattering = 0.04382 cm2/g (NIST XCOM). Rayleigh-scattered photons
+# (~3 mrad at 6 MeV) keep their energy and still hit the 2x2 cm cell, so they count as uncollided.
+# rho(G4_Pb) = 11.35 g/cm3, x = 5 cm; 49.1 cm of G4_AIR (1.20479e-3 g/cm3, mu/rho 0.02522 cm2/g) on the path.
+XCOM=0.04382
+NGAMMA=$(awk '/^\/run\/beamOn/ {print $2}' "$RES/transmission.mac")
+mu_rho() {  # <csv> -> "count mu/rho sigma"
+  awk -F, -v N="$NGAMMA" '!/^#/ {n = $4} END {
+    T = n / N; air = 0.02522 * 1.20479e-3 * 49.1
+    printf "%d %.6f %.6f\n", n, (-log(T) - air) / (11.35 * 5), sqrt((1 - T) / (N * T)) / (11.35 * 5) }' "$1"
+}
+check_xcom() {  # <label> <mu> <sigma>
+  echo "      $1: mu/rho = $2 +- $3 cm2/g, XCOM $XCOM, ratio $(awk -v m="$2" -v r=$XCOM 'BEGIN {printf "%.4f", m / r}')"
+  awk -v m="$2" -v r=$XCOM 'BEGIN {exit !(m / r > 0.96 && m / r < 1.04)}' \
+    && pass "$1 attenuation within 4% of NIST XCOM" || fail "$1 attenuation differs from NIST XCOM by more than 4%"
+}
+mkdir -p native && cd native || exit 1
+run transmission.log transmission.mac
+cd "$WORK" || exit 1
+read -r n1 mu1 s1 <<< "$(mu_rho native/transmission.csv)"
+echo "      native: $n1 of $NGAMMA photons uncollided"
+check_xcom native "$mu1" "$s1"
+
+echo "== 4. GDML round trip (export the B2 geometry, read it back)"
+mkdir -p gdml && cd gdml || exit 1
+printf '/run/initialize\n/persistency/gdml/write b2.gdml\n' > export.mac
+run export.log export.mac
+run transmission.log -g b2.gdml transmission.mac
+read -r n2 mu2 s2 <<< "$(mu_rho transmission.csv)"
+echo "      GDML: $n2 of $NGAMMA photons uncollided"
+check_xcom GDML "$mu2" "$s2"
+awk -v a="$mu1" -v b="$mu2" -v s1="$s1" -v s2="$s2" 'BEGIN {d = a - b; exit !(d * d <= 9 * (s1 * s1 + s2 * s2))}' \
+  && pass "GDML and native attenuation agree within 3 sigma" || fail "GDML and native attenuation differ"
+hits=$(sed -nE 's/.* ([0-9]+) hits stored in this event.*/\1/p' transmission.log | awk '$1 > 0 {h++} END {print h + 0}')
+[ "$hits" -gt 0 ] && pass "tracker hits in GDML chambers ($hits printed events with hits)" || fail "no tracker hits with GDML geometry"
+cd "$WORK" || exit 1
+
+echo "== 5. Which bundled data is read (information only)"
+# Hide one entry at a time through a symlinked copy of the data directory; the bundle is not modified.
+# "NEEDED": the smoke run fails, or reports more G4Exception warnings than with all data present.
+base_warnings=$(grep -c 'WWWW ------- G4Exception-START' smoke.log)
+hide_one() {  # <path relative to data/>
+  rm -rf datamask && mkdir datamask
+  for d in "$RES"/data/*; do
+    if [[ "$1" == "$(basename "$d")"/* ]]; then  # hide a subdirectory of this dataset
+      mkdir "datamask/$(basename "$d")"
+      for s in "$d"/*; do [ "$(basename "$d")/$(basename "$s")" = "$1" ] || ln -s "$s" "datamask/$(basename "$d")/"; done
+    elif [ "$(basename "$d")" != "$1" ]; then
+      ln -s "$d" datamask/
+    fi
+  done
+  if GEANT4_DATA_DIR="$WORK/datamask" "$EXE" smoke.mac > mask.log 2>&1 \
+     && ! grep -q 'EEEE ------- G4Exception-START' mask.log \
+     && [ "$(grep -c 'WWWW ------- G4Exception-START' mask.log)" -le "$base_warnings" ]; then
+    printf '      %-40s not read\n' "$1"
+  else
+    printf '      %-40s NEEDED\n' "$1"
+  fi
+}
+for d in "$RES"/data/*; do
+  hide_one "$(basename "$d")"
+  case "$(basename "$d")" in G4EMLOW*) for s in "$d"/*; do [ -d "$s" ] && hide_one "$(basename "$d")/$(basename "$s")"; done ;; esac
+done
+rm -rf datamask
+
+echo
+if [ "$fails" -eq 0 ]; then echo "ALL CHECKS PASSED"; else echo "$fails CHECK(S) FAILED"; fi
+exit "$fails"

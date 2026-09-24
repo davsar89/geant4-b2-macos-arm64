@@ -1,0 +1,96 @@
+name: macos-arm64
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Restore dependencies (Qt, Xerces-C, static Geant4, datasets)
+        id: deps-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: deps
+          key: deps-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('versions.env') }}
+
+      - name: Build dependencies
+        run: bash build_mac.sh deps
+
+      - name: Save dependencies
+        if: steps.deps-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: deps
+          key: ${{ steps.deps-cache.outputs.cache-primary-key }}
+
+      - name: Build and package exampleB2a.app
+        run: bash build_mac.sh app
+
+      - uses: actions/upload-artifact@v7
+        with:
+          path: dist/exampleB2a-macos-arm64.zip
+          archive: false
+
+  # Fresh runners without Qt, Xerces or Geant4: the package must work on its own.
+  test:
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, macos-26]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: exampleB2a-macos-arm64.zip
+          skip-decompress: true
+
+      - name: Unzip
+        run: ditto -x -k exampleB2a-macos-arm64.zip . && cat exampleB2a-macos-arm64/BUILD_INFO.txt
+
+      - name: Self-test (linking, macros, physics vs NIST, GDML round trip, data usage)
+        run: TEST_WORKDIR="$PWD/test-logs" ./exampleB2a-macos-arm64/test_package.sh
+
+      - name: GUI smoke test (Qt 3D view, information only)
+        if: always()
+        continue-on-error: true
+        run: |
+          ./exampleB2a-macos-arm64/exampleB2a.app/Contents/MacOS/exampleB2a > test-logs/gui.log 2>&1 &
+          pid=$!
+          sleep 45
+          screencapture -x test-logs/gui.png || echo "screencapture failed"
+          if kill -0 "$pid"; then echo "GUI still running after 45 s"; else echo "GUI exited early"; fi
+          kill "$pid" || true
+          grep -E 'G4Exception|TSG|OpenGL|Qt' test-logs/gui.log | head -n 40 || true
+
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: test-logs-${{ matrix.os }}
+          path: test-logs
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: exampleB2a-macos-arm64.zip
+          skip-decompress: true
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >
+          gh release create "$GITHUB_REF_NAME" exampleB2a-macos-arm64.zip
+          --repo "$GITHUB_REPOSITORY" --title "exampleB2a $GITHUB_REF_NAME (macOS Apple Silicon)"
+          --notes "Portable Geant4 11.4 example B2a for Apple Silicon Macs (macOS 12+): Qt 3D view, GDML import, EM physics. Unzip, then see README.md."
