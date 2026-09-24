@@ -30,7 +30,7 @@ From Terminal, inside the unzipped folder:
 ./run.command run1.mac                   # batch run of a macro (no window)
 ./run.command -g detector.gdml           # Qt window with your GDML geometry
 ./run.command -g detector.gdml run2.mac  # batch run with your GDML geometry
-./test_package.sh                        # self-test, about 5 minutes (see below)
+./test_package.sh                        # self-test, a few minutes (see below)
 ```
 
 Macros are searched first in the current directory, then inside the app
@@ -90,11 +90,18 @@ Only the data that EM physics needs is bundled — no hadronic cross sections:
 2. `run1.mac` (materials, 0.2 T field, step limit, e−/e+) and `smoke.mac` run cleanly with only
    the bundled data.
 3. **Physics:** the fraction of 6 MeV photons that cross the 5 cm lead target without interacting
-   gives μ/ρ(Pb, 6 MeV). It must agree within 4 % with NIST XCOM (0.04382 cm²/g, without coherent
-   scattering). 200 000 photons give a statistical error of about 0.3 %.
+   gives μ/ρ(Pb, 6 MeV), with a statistical error of about 0.3 % (200 000 photons). It must agree
+   - within 4 % with NIST XCOM (0.04382 cm²/g, without coherent scattering), and
+   - within 3σ with 0.04433 cm²/g, the value from the formulas Geant4 11.4.2 implements.
+
+   The two references differ because Geant4's parameterised pair-production cross section is 2.3 %
+   above XCOM at 6 MeV. That is within its documented accuracy (< 5 %). CI measures
+   0.04447 ± 0.00013 cm²/g: 1.5 % above XCOM and 1.1σ from Geant4's own formulas. So the transport
+   in this package reproduces the implemented physics.
 4. **GDML:** the B2 geometry is written to GDML, read back with `-g`, and must give the same
-   attenuation and tracker hits.
-5. (information) which bundled datasets and G4EMLOW subdirectories the physics actually reads.
+   attenuation and tracker hits (CI: identical photon counts).
+5. `--data-usage` (information only): which bundled datasets and G4EMLOW subdirectories the physics
+   actually reads. Geant4 aborts on purpose here, so macOS shows "quit unexpectedly" dialogs.
 
 ## How it is built
 

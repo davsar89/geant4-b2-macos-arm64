@@ -56,7 +56,7 @@ jobs:
         run: ditto -x -k exampleB2a-macos-arm64.zip . && cat exampleB2a-macos-arm64/BUILD_INFO.txt
 
       - name: Self-test (linking, macros, physics vs NIST, GDML round trip, data usage)
-        run: TEST_WORKDIR="$PWD/test-logs" ./exampleB2a-macos-arm64/test_package.sh
+        run: TEST_WORKDIR="$PWD/test-logs" ./exampleB2a-macos-arm64/test_package.sh --data-usage
 
       - name: GUI smoke test (Qt 3D view, information only)
         if: always()
