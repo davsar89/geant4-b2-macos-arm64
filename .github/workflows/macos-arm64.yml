@@ -15,7 +15,7 @@ jobs:
 
       - name: Restore dependencies (Qt, Xerces-C, static Geant4, datasets)
         id: deps-cache
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v6
         with:
           path: deps
           key: deps-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('versions.env') }}
@@ -25,7 +25,7 @@ jobs:
 
       - name: Save dependencies
         if: steps.deps-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v6
         with:
           path: deps
           key: ${{ steps.deps-cache.outputs.cache-primary-key }}
@@ -61,6 +61,7 @@ jobs:
       - name: GUI smoke test (Qt 3D view, information only)
         if: always()
         continue-on-error: true
+        timeout-minutes: 3
         run: |
           ./exampleB2a-macos-arm64/exampleB2a.app/Contents/MacOS/exampleB2a > test-logs/gui.log 2>&1 &
           pid=$!

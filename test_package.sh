@@ -38,13 +38,17 @@ run() {
 
 echo "== 1. Binary and linking"
 file "$EXE" | grep -q 'arm64' && pass "arm64 executable" || fail "not arm64: $(file "$EXE")"
-echo "      minimum macOS: $(otool -l "$EXE" | awk '/LC_BUILD_VERSION/ {f = 1} f && /minos/ {print $2; exit}')"
-bad=$(find "$APP" -path "$RES/data" -prune -o -type f -print | while read -r f; do
-        file "$f" | grep -q 'Mach-O' || continue
-        otool -arch arm64 -L "$f" | tail -n +2 | awk '{print $1}' \
-          | grep -vE '^(/usr/lib/|/System/Library/|@rpath/|@executable_path/|@loader_path/)' | sed "s|^|$f: |"
-      done)
-[ -z "$bad" ] && pass "only macOS system libraries and bundled Qt" || { fail "external library dependencies:"; echo "$bad"; }
+if xcode-select -p > /dev/null 2>&1; then  # otool comes with the Xcode command line tools
+  echo "      minimum macOS: $(otool -l "$EXE" | awk '/LC_BUILD_VERSION/ {f = 1} f && /minos/ {print $2; exit}')"
+  bad=$(find "$APP" -path "$RES/data" -prune -o -type f -print | while read -r f; do
+          file "$f" | grep -q 'Mach-O' || continue
+          otool -arch arm64 -L "$f" | tail -n +2 | awk '{print $1}' \
+            | grep -vE '^(/usr/lib/|/System/Library/|@rpath/|@executable_path/|@loader_path/)' | sed "s|^|$f: |"
+        done)
+  [ -z "$bad" ] && pass "only macOS system libraries and bundled Qt" || { fail "external library dependencies:"; echo "$bad"; }
+else
+  echo "SKIP  library check (needs the Xcode command line tools; the runs below still prove the app starts)"
+fi
 
 echo "== 2. B2 macros with the bundled data"
 run run1.log run1.mac
@@ -52,7 +56,8 @@ run smoke.log smoke.mac
 
 echo "== 3. Physics: uncollided 6 MeV gamma transmission through 5 cm of lead vs NIST XCOM"
 # mu/rho(Pb, 6 MeV) without coherent scattering = 0.04382 cm2/g (NIST XCOM). Rayleigh-scattered photons
-# (~3 mrad at 6 MeV) keep their energy and still hit the 2x2 cm cell, so they count as uncollided.
+# (at most a few tens of mrad at 6 MeV, i.e. < 3 mm off axis at the cell) keep their energy and still hit
+# the 2x2 cm cell, so they count as uncollided; coherent is anyway only 0.2% of mu here.
 # rho(G4_Pb) = 11.35 g/cm3, x = 5 cm; 49.1 cm of G4_AIR (1.20479e-3 g/cm3, mu/rho 0.02522 cm2/g) on the path.
 XCOM=0.04382
 NGAMMA=$(awk '/^\/run\/beamOn/ {print $2}' "$RES/transmission.mac")
@@ -87,31 +92,37 @@ hits=$(sed -nE 's/.* ([0-9]+) hits stored in this event.*/\1/p' transmission.log
 [ "$hits" -gt 0 ] && pass "tracker hits in GDML chambers ($hits printed events with hits)" || fail "no tracker hits with GDML geometry"
 cd "$WORK" || exit 1
 
-echo "== 5. Which bundled data is read (information only)"
-# Hide one entry at a time through a symlinked copy of the data directory; the bundle is not modified.
-# "NEEDED": the smoke run fails, or reports more G4Exception warnings than with all data present.
+echo "== 5. Which bundled data is used (information only)"
+# Run smoke.mac against a symlinked copy of the data directory with one entry masked; the bundle is
+# not modified. "missing": entry removed; "empty": dataset replaced by an empty directory (tests whether
+# its files are read, or only its presence is checked). "NEEDED": the run fails or reports more
+# G4Exception warnings than with all data present.
 base_warnings=$(grep -c 'WWWW ------- G4Exception-START' smoke.log)
-hide_one() {  # <path relative to data/>
+mask_run() {  # <path relative to data/> <missing|empty>
   rm -rf datamask && mkdir datamask
   for d in "$RES"/data/*; do
-    if [[ "$1" == "$(basename "$d")"/* ]]; then  # hide a subdirectory of this dataset
-      mkdir "datamask/$(basename "$d")"
-      for s in "$d"/*; do [ "$(basename "$d")/$(basename "$s")" = "$1" ] || ln -s "$s" "datamask/$(basename "$d")/"; done
-    elif [ "$(basename "$d")" != "$1" ]; then
+    local n; n=$(basename "$d")
+    if [[ "$1" == "$n"/* ]]; then  # mask one subdirectory of this dataset
+      mkdir "datamask/$n"
+      for s in "$d"/*; do [ "$n/$(basename "$s")" = "$1" ] || ln -s "$s" "datamask/$n/"; done
+    elif [ "$n" = "$1" ]; then
+      [ "$2" = empty ] && mkdir "datamask/$n"
+    else
       ln -s "$d" datamask/
     fi
   done
   if GEANT4_DATA_DIR="$WORK/datamask" "$EXE" smoke.mac > mask.log 2>&1 \
      && ! grep -q 'EEEE ------- G4Exception-START' mask.log \
      && [ "$(grep -c 'WWWW ------- G4Exception-START' mask.log)" -le "$base_warnings" ]; then
-    printf '      %-40s not read\n' "$1"
+    printf '      %-36s %-8s not used\n' "$1" "$2"
   else
-    printf '      %-40s NEEDED\n' "$1"
+    printf '      %-36s %-8s NEEDED   %s\n' "$1" "$2" "$(grep -m1 -A2 'G4Exception :' mask.log | tail -n 1)"
   fi
 }
 for d in "$RES"/data/*; do
-  hide_one "$(basename "$d")"
-  case "$(basename "$d")" in G4EMLOW*) for s in "$d"/*; do [ -d "$s" ] && hide_one "$(basename "$d")/$(basename "$s")"; done ;; esac
+  mask_run "$(basename "$d")" missing
+  mask_run "$(basename "$d")" empty
+  case "$(basename "$d")" in G4EMLOW*) for s in "$d"/*; do [ -d "$s" ] && mask_run "$(basename "$d")/$(basename "$s")" missing; done ;; esac
 done
 rm -rf datamask
 

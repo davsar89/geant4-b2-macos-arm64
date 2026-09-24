@@ -14,6 +14,15 @@ DEPS="$ROOT/deps"
 PREFIX="$DEPS/install"
 QT="$DEPS/qt/$QT_VERSION/macos"
 JOBS="$(sysctl -n hw.ncpu)"
+# Bundled datasets, <tarball>:<directory>:<md5> from Geant4 11.4.2 cmake/Modules/G4DatasetDefinitions.cmake
+#  G4EMLOW            EM low-energy data (Livermore photoelectric/Rayleigh, Seltzer-Berger bremsstrahlung, ...)
+#  G4ENSDFSTATE       nuclide table, read by /run/initialize even for EM-only physics
+#  PhotonEvaporation  since 11.4.2, G4EmBuilder -> G4PhysListUtil::InitialiseParameters -> G4NuclearLevelData
+#                     -> G4LevelReader aborts at start-up (had014) if this directory cannot be found
+G4_DATASETS="
+G4EMLOW.8.8:G4EMLOW8.8:328330009df633f7e9b3a9f445745298
+G4ENSDFSTATE.3.0:G4ENSDFSTATE3.0:c500728534ce3e9fb2fefa0112eb3a74
+G4PhotonEvaporation.6.1.2:PhotonEvaporation6.1.2:d80ba9bdefcf9e23487a26adfa273304"
 # G4EMLOW subdirectories for physics this binary cannot run (DNA, MicroElec, DPWA and
 # JAEA elastic, Goudsmit-Saunderson msc): 611 of 697 MB. test_package.sh proves they are not read.
 EMLOW_DROP="dna microelec dpwa JAEAESData msc_GS"
@@ -52,7 +61,7 @@ build_deps() {
   if [ ! -f "$PREFIX/lib/libxerces-c.a" ]; then
     fetch "https://archive.apache.org/dist/xerces/c/3/sources/xerces-c-$XERCES_VERSION.tar.gz" | tar xz -C "$DEPS/src"
     cmake -S "$DEPS/src/xerces-c-$XERCES_VERSION" -B "$DEPS/build/xerces" "${CMAKE_COMMON[@]}" \
-      -DCMAKE_INSTALL_PREFIX="$PREFIX" -DCMAKE_CXX_STANDARD=17 \
+      -DCMAKE_INSTALL_PREFIX="$PREFIX" \
       -DBUILD_SHARED_LIBS=OFF -Dnetwork=OFF -Dtranscoder=iconv -Dmessage-loader=inmemory
     cmake --build "$DEPS/build/xerces" --parallel "$JOBS"
     cmake --install "$DEPS/build/xerces"
@@ -75,10 +84,9 @@ build_deps() {
   local known
   known="$("$PREFIX/bin/geant4-config" --datasets)"
   for entry in $G4_DATASETS; do
-    file="${entry%%:*}" md5="${entry##*:}"
-    dir="${file/./}"  # G4EMLOW.8.8 -> G4EMLOW8.8
+    IFS=: read -r file dir md5 <<< "$entry"
     grep -q "/$dir\$" <<< "$known" \
-      || { echo "Geant4 $G4_VERSION does not use $dir: update G4_DATASETS in versions.env"; exit 1; }
+      || { echo "Geant4 $G4_VERSION does not use $dir: update G4_DATASETS in build_mac.sh"; exit 1; }
     [ -d "$DEPS/data/$dir" ] && continue
     curl -fL --retry 3 -o "$DEPS/data/$file.tar.gz" "https://cern.ch/geant4-data/datasets/$file.tar.gz"
     [ "$(md5 -q "$DEPS/data/$file.tar.gz")" = "$md5" ] || { echo "md5 mismatch for $file"; exit 1; }
@@ -106,8 +114,12 @@ build_app() {
   # Macros and EM datasets inside the bundle (main() points GEANT4_DATA_DIR there)
   mkdir -p "$res/data"
   cp "$ROOT"/B2a/*.mac "$res/"
-  cp -R "$DEPS"/data/* "$res/data/"
+  for entry in $G4_DATASETS; do
+    IFS=: read -r _ dir _ <<< "$entry"
+    cp -R "$DEPS/data/$dir" "$res/data/"
+  done
   for d in $EMLOW_DROP; do rm -rf "$res"/data/G4EMLOW*/"$d"; done
+  plutil -replace CFBundleIdentifier -string io.github.davsar89.exampleB2a "$app/Contents/Info.plist"
   plutil -replace NSHighResolutionCapable -bool true "$app/Contents/Info.plist"
 
   # arm64 code must be signed; ad-hoc signature (no Apple Developer ID)

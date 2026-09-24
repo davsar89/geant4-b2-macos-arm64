@@ -64,17 +64,22 @@ exampleB2a-macos-arm64/
 │       ├── Frameworks/, PlugIns/     Qt 6 (dynamic libraries, bundled)
 │       └── Resources/
 │           ├── *.mac                 macros
-│           └── data/                 G4EMLOW8.8 (EM part) + G4ENSDFSTATE3.0
+│           └── data/                 G4EMLOW8.8 (EM part), G4ENSDFSTATE3.0, PhotonEvaporation6.1.2
 ├── run.command
 ├── test_package.sh
 ├── BUILD_INFO.txt                    exact versions, flags, data sizes
 └── licenses/
 ```
 
-Only EM data is bundled. G4ENSDFSTATE (0.3 MB) is required by Geant4's nuclide table even for
-EM-only runs. From G4EMLOW 8.8 the directories `dna microelec dpwa JAEAESData msc_GS` (611 of 697 MB)
-are removed; they belong to physics this binary does not contain (Geant4-DNA, MicroElec, option-4 and
-Livermore/Penelope multiple scattering). The app finds its data inside the bundle through
+Only the data that EM physics needs is bundled — no hadronic cross sections:
+
+- **G4EMLOW 8.8**, without `dna microelec dpwa JAEAESData msc_GS` (611 of 697 MB). Those directories
+  belong to physics this binary does not contain (Geant4-DNA, MicroElec, option-4 and
+  Livermore/Penelope multiple scattering).
+- **G4ENSDFSTATE 3.0** (2 MB): Geant4's nuclide table reads it at `/run/initialize`, even for EM-only runs.
+- **PhotonEvaporation 6.1.2** (42 MB): since Geant4 11.4.2, every EM constructor
+  (`G4EmBuilder` → `G4NuclearLevelData` → `G4LevelReader`) stops the program at start-up if this
+  directory is missing. `test_package.sh` reports whether its files are actually read. The app finds its data inside the bundle through
 `GEANT4_DATA_DIR`; if you set `GEANT4_DATA_DIR` or `G4LEDATA` yourself, your value is used.
 
 ## Self-test
